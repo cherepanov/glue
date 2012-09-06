@@ -25,7 +25,9 @@ ORDERINGS = ['maxside', 'width', 'height', 'area']
 VALID_IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif']
 PSEUDO_CLASSES = set(['link', 'visited', 'active', 'hover', 'focus',
                       'first-letter', 'first-line', 'first-child',
-                      'before', 'after'])
+                      'before', 'after', 'checked'])
+KNOWN_TAGS = set(['input', 'radio'])
+
 
 DEFAULT_SETTINGS = {
     'padding': '0',
@@ -36,7 +38,6 @@ DEFAULT_SETTINGS = {
     'crop': False,
     'url': '',
     'less': False,
-    'optipng': False,
     'html': False,
     'ignore_filename_paddings': False,
     'png8': False,
@@ -53,7 +54,7 @@ DEFAULT_SETTINGS = {
         ('%(all_classes)s{background-image:url(%(sprite_url)s);'
          'background-repeat:no-repeat}\n'),
     'each_template':
-        ('%(class_name)s{background-position:%(x)s %(y)s;'
+        ('%(selector_name)s{background-position:%(x)s %(y)s;'
          'width:%(width)s;height:%(height)s;}\n'),
     'ratio_template':
         ('@media '
@@ -79,7 +80,7 @@ tr div{ border:1px solid white;}</style><h1>CSS Classes</h1><table>
 """
 
 TEST_HTML_SPRITE_TEMPLATE = """
-<tr><td>.%(class_name)s </td><td><div class="%(class_name)s"></div></td></tr>
+<tr><td>.%(selector_name)s </td><td><div class="%(class_name)s"></div></td></tr>
 """
 
 
@@ -382,9 +383,6 @@ class Image(object):
         self.sprite = sprite
         self.filename, self.format = name.rsplit('.', 1)
 
-        pseudo = set(self.filename.split('_')).intersection(PSEUDO_CLASSES)
-        self.pseudo = ':%s' % list(pseudo)[-1] if pseudo else ''
-
         image_path = os.path.join(sprite.path, name)
         image_file = open(image_path, "rb")
 
@@ -467,8 +465,22 @@ class Image(object):
             padding = [DEFAULT_SETTINGS['padding']] * 4
         return map(int, padding)
 
+    def _parse_element_type(self, chunk):
+        tag_pattern = '(' + '|'.join(map(str, KNOWN_TAGS)) + ')(%(\w+)=(\w+)){0,1}'
+        tag_re = re.compile(tag_pattern)
+        tag_match = tag_re.match(chunk)
+
+        if tag_match:
+            matches = tag_match.groups()
+            if matches[3]:
+                return matches[0] + "[" + matches[2] + "=" + matches[3] + "]"
+
+            return matches[0]
+
+        return ''
+
     @cached_property
-    def class_name(self):
+    def selector_name(self):
         """Return the CSS class name for this file.
 
         This CSS class name will have the following format:
@@ -489,7 +501,29 @@ class Image(object):
         option. For a camelCase representation of the CSS class name use
         ``camelcase`` as separator.
         """
-        name = self.filename
+
+        name = os.path.basename(self.filename)
+        has_tags = False
+        namespace = ''
+
+        prefix_pos = self.filename.rfind(os.path.sep)
+        if(prefix_pos):
+            namespace = self.filename[:prefix_pos].replace(os.path.sep, '-')
+
+        chunks = name.split('_')
+
+        for c in chunks:
+            tag_selector = self._parse_element_type(c)
+            if tag_selector:
+                has_tags = True
+                name = name.replace(c, tag_selector)
+                chunks.remove(c)
+
+        for c in chunks:
+            pseudo = set([c]).intersection(PSEUDO_CLASSES)
+            if len(pseudo):
+                name = name.replace('_' + c, ':' + c + ' ')
+                chunks.remove(c)
 
         # Remove padding information
         if not self.sprite.manager.config.ignore_filename_paddings:
@@ -498,12 +532,8 @@ class Image(object):
                 padding_info_name = '_%s' % padding_info_name
             name = name.replace(padding_info_name, '')
 
-        # Remove pseudo-class information
-        if self.pseudo:
-            name = name.replace('_%s' % self.pseudo[1:], '')
-
         # Clean filename
-        name = re.sub(r'[^\w\-_]', '', name)
+        #name = re.sub(r'[^\w\-_]', '', name)
 
         # Customize the name if necessary
         separator = self.sprite.manager.config.separator
@@ -512,10 +542,10 @@ class Image(object):
             if self.sprite.namespace:
                 name = name[:1].capitalize() + name[1:]
 
-        # Add pseudo-class information
-        name = '%s%s' % (name, self.pseudo)
+        name = name.replace('_', '')
 
-        return separator.join([self.sprite.namespace, name])
+        result = name if has_tags else '.' + separator.join([self.sprite.namespace, namespace, name])
+        return result
 
     @cached_property
     def _padding_info(self):
@@ -620,6 +650,16 @@ class Sprite(object):
 
         self.algorithm.process(self)
 
+    def _get_files_recursive(self):
+        items = list()
+
+        for root, dirs, files in os.walk(self.path):
+            dir_name = root.replace(self.path, '').lstrip(os.path.sep) + os.path.sep
+            for f in files:
+                items.append(dir_name + f)
+
+        return items
+
     def _locate_images(self):
         """Return all valid images within a folder.
 
@@ -632,24 +672,32 @@ class Sprite(object):
         The list of images will be ordered using the desired ordering
         algorithm. The default is 'maxside'.
         """
+
         extensions = '|'.join(VALID_IMAGE_EXTENSIONS)
         extension_re = re.compile('.+\.(%s)$' % extensions, re.IGNORECASE)
-        files = sorted(os.listdir(self.path))
-        images = [Image(n, sprite=self) for n in files if \
-                                    not n.startswith('.') and \
-                                    extension_re.match(n)]
+
+        try:
+            files = {
+                'recursive': self._get_files_recursive
+            }[self.manager.get_name()]()
+        except Exception:
+            files = sorted(os.listdir(self.path))
+
+        images = [Image(n, sprite=self) for n in files if\
+                                        not n.startswith('.')\
+                                        and extension_re.match(n)]
 
         if not len(images):
             raise SourceImagesNotFoundError()
 
         # Check if there are duplicate class names
-        class_names = [i.class_name for i in images]
+        class_names = [i.selector_name for i in images]
         if len(set(class_names)) != len(images):
-            dup = [i for i in images if class_names.count(i.class_name) > 1]
+            dup = [i for i in images if class_names.count(i.selector_name) > 1]
             raise MultipleImagesWithSameNameError(dup)
 
         for image in images:
-            self.manager.log("\t %s => .%s" % (image.name, image.class_name))
+            self.manager.log("\t %s => %s" % (image.name, image.selector_name))
 
         return sorted(images, reverse=self.config.ordering[0] != '-')
 
@@ -749,8 +797,8 @@ class Sprite(object):
         css_file = open(css_filename, 'w')
 
         # get all the class names and join them
-        class_names = ',\n'.join(['.%s' % i.class_name for i in self.images \
-                                                  if ':' not in i.class_name])
+        class_names = ',\n'.join(['%s' % i.selector_name for i in self.images \
+                                                  if ':' not in i.selector_name])
 
         # add the global style for all the sprites for less bloat
         template = self.config.global_template.decode('unicode-escape')
@@ -770,7 +818,7 @@ class Sprite(object):
             width = '%spx' % round_up((image.width / self.max_ratio) + image.horizontal_padding)
 
             template = self.config.each_template.decode('unicode-escape')
-            css_file.write(template % {'class_name': '.%s' % image.class_name,
+            css_file.write(template % {'selector_name': '%s' % image.selector_name,
                                        'sprite_url': self.image_url(),
                                        'height': height,
                                        'width': width,
@@ -810,8 +858,8 @@ class Sprite(object):
         html_file = open(html_filename, 'w')
 
         # get all the class names and join them
-        class_names = [i.class_name for i in self.images \
-                                                if ':' not in i.class_name]
+        class_names = [i.selector_name for i in self.images \
+                                                if ':' not in i.selector_name]
 
         sprite_template = TEST_HTML_SPRITE_TEMPLATE.decode('unicode-escape')
         sprites_html = [sprite_template % {'class_name':c} for c in class_names]
@@ -950,10 +998,17 @@ class BaseManager(object):
                        configuration for this sprite.
         :param output: output dir.
         """
+
+        self.type = 'base';
         self.path = path
         self.config = config
         self.output = output
         self.sprites = []
+
+    def get_name(self):
+        if(hasattr(self, 'type')):
+            return self.type
+        return ''
 
     def process_sprite(self, path, name):
         """Create a new Sprite using this path and name and append it to the
@@ -1000,6 +1055,29 @@ class BaseManager(object):
     def process(self):
         raise NotImplementedError()
 
+class RecursiveSpriteManager(BaseManager):
+
+    def process(self):
+        """Process a path searching for folders that contain images.
+        All images will be combined in one sprite, but
+
+        If two images have the same name,
+        :class:`~MultipleImagesWithSameNameError` will be raised.
+
+        This is not the default manager. It is only used if you use
+        the ``--recursive`` argument.
+        """
+
+        self.type = 'recursive'
+
+        if os.path.isdir(self.path):
+            self.process_sprite(path=self.path, name=os.path.basename(self.path))
+
+        if not len(self.sprites):
+            raise NoSpritesFoldersFoundError()
+
+        self.save()
+
 
 class ProjectSpriteManager(BaseManager):
 
@@ -1035,6 +1113,9 @@ class ProjectSpriteManager(BaseManager):
         This is not the default manager. It is only used if you use
         the ``--project`` argument.
         """
+
+        self.type = 'sprite'
+
         for sprite_name in os.listdir(self.path):
             # Only process folders
             path = os.path.join(self.path, sprite_name)
@@ -1046,7 +1127,6 @@ class ProjectSpriteManager(BaseManager):
 
         self.save()
 
-
 class SimpleSpriteManager(BaseManager):
 
     def process(self):
@@ -1055,6 +1135,9 @@ class SimpleSpriteManager(BaseManager):
 
         This is the default manager.
         """
+
+        self.type = 'simple'
+
         self.process_sprite(path=self.path, name=os.path.basename(self.path))
         self.save()
 
@@ -1129,8 +1212,9 @@ def command_exists(command):
     :param command: command name.
     """
     try:
-        subprocess.check_call([command], shell=True, stdin=subprocess.PIPE,
-                              stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+        #FIXME: optipng don't like stdin redirect "stdin=subprocess.PIPE"
+        #subprocess.check_call([command], shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        subprocess.call([command], shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except subprocess.CalledProcessError:
         return False
     return True
@@ -1184,6 +1268,8 @@ def main():
                                  "| --css=<dir> --img=<dir>]"))
     parser.add_option("--project", action="store_true", dest="project",
             help="generate sprites for multiple folders")
+    parser.add_option("--recursive", action="store_true", dest="recursive",
+            help="generate one sprite from multiple folders")
     parser.add_option("-c", "--crop", dest="crop", action='store_true',
             help="crop images removing unnecessary transparent margins")
     parser.add_option("-l", "--less", dest="less", action='store_true',
@@ -1302,6 +1388,8 @@ def main():
 
     if options.project:
         manager_cls = ProjectSpriteManager
+    elif options.recursive:
+        manager_cls = RecursiveSpriteManager
     else:
         manager_cls = SimpleSpriteManager
 
@@ -1328,7 +1416,7 @@ def main():
     except MultipleImagesWithSameNameError, e:
         sys.stderr.write("Error: Some images will have the same class name:\n")
         for image in e.args[0]:
-            sys.stderr.write('\t %s => .%s\n' % (image.name, image.class_name))
+            sys.stderr.write('\t %s => .%s\n' % (image.name, image.selector_name))
         sys.exit(e.error_code)
     except SourceImagesNotFoundError, e:
         sys.stderr.write("Error: No images found.\n")
