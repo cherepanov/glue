@@ -52,7 +52,7 @@ DEFAULT_SETTINGS = {
     'cachebuster-filename': False,
     'global_template':
         ('%(all_classes)s{background-image:url(%(sprite_url)s);'
-         'background-repeat:no-repeat}\n'),
+         'background-repeat:no-repeat; background-color:transparent;}\n'),
     'each_template':
         ('%(selector_name)s{background-position:%(x)s %(y)s;'
          'width:%(width)s;height:%(height)s;}\n'),
@@ -797,8 +797,9 @@ class Sprite(object):
         css_file = open(css_filename, 'w')
 
         # get all the class names and join them
-        class_names = ',\n'.join(['%s' % i.selector_name for i in self.images \
-                                                  if ':' not in i.selector_name])
+#        class_names = ',\n'.join(['%s' % i.selector_name for i in self.images \
+#                                                  if ':' not in i.selector_name])
+        class_names = ',\n'.join(i.selector_name for i in self.images)
 
         # add the global style for all the sprites for less bloat
         template = self.config.global_template.decode('unicode-escape')
