@@ -512,17 +512,18 @@ class Image(object):
 
         chunks = name.split('_')
 
-        for c in chunks:
+        for c in chunks[:]:
             tag_selector = self._parse_element_type(c)
             if tag_selector:
                 has_tags = True
                 name = name.replace(c, tag_selector)
                 chunks.remove(c)
 
-        for c in chunks:
+        for c in chunks[:]:
             pseudo = set([c]).intersection(PSEUDO_CLASSES)
             if len(pseudo):
-                name = name.replace('_' + c, ':' + c + ' ')
+                #TODO: check for space after
+                name = name.replace('_' + c, ':' + c)
                 chunks.remove(c)
 
         # Remove padding information
